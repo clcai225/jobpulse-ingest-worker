@@ -1,0 +1,16 @@
+name = "jobpulse-ingest"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+rules = [
+  { type = "Text", globs = ["**/*.html"] }
+]
+
+routes = [
+  { pattern = "jobpulse.clcai.cn/v1/*", zone_name = "clcai.cn" }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "jobpulse"
+database_id = "1c624438-c86f-4473-9c80-4135f077aecc"

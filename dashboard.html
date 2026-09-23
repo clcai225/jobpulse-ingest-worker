@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JobPulse Dashboard</title>
+<style>
+:root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e; --green:#3fb950; --red:#f85149; --blue:#58a6ff; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:var(--bg); color:var(--text); padding:2rem; }
+.header { display:flex; align-items:center; gap:0.75rem; margin-bottom:2rem; }
+.header h1 { font-size:1.5rem; font-weight:600; }
+.header .logo { font-size:1.75rem; }
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:1rem; margin-bottom:2rem; }
+.stat-card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:1.25rem; }
+.stat-card .label { font-size:0.8rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:0.5rem; }
+.stat-card .value { font-size:2rem; font-weight:700; }
+.stat-card .value.green { color:var(--green); }
+.stat-card .value.red { color:var(--red); }
+.token-bar { display:flex; gap:0.5rem; margin-bottom:1.5rem; }
+.token-bar input { flex:1; background:var(--card); border:1px solid var(--border); border-radius:6px; padding:0.5rem 0.75rem; color:var(--text); font-size:0.9rem; }
+.token-bar button { background:var(--blue); color:#fff; border:none; border-radius:6px; padding:0.5rem 1rem; cursor:pointer; font-size:0.9rem; }
+.token-bar button:hover { opacity:0.9; }
+table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+th,td { padding:0.75rem 1rem; text-align:left; border-bottom:1px solid var(--border); }
+th { background:var(--bg); font-size:0.8rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; }
+td { font-size:0.9rem; }
+.badge { display:inline-block; padding:0.2rem 0.6rem; border-radius:12px; font-size:0.75rem; font-weight:600; }
+.badge.success { background:rgba(63,185,80,0.15); color:var(--green); }
+.badge.failure { background:rgba(248,81,73,0.15); color:var(--red); }
+.badge.unknown { background:rgba(139,148,158,0.15); color:var(--muted); }
+.error { color:var(--red); font-size:0.9rem; margin-top:1rem; }
+.muted { color:var(--muted); font-size:0.85rem; }
+h2 { font-size:1.1rem; margin:1.5rem 0 0.75rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="header"><span class="logo">&#128200;</span><h1>JobPulse</h1></div>
+<div class="token-bar">
+  <input type="password" id="token" placeholder="Paste your ingest token..." />
+  <button onclick="load()">Load</button>
+</div>
+<div id="error" class="error" style="display:none"></div>
+<div id="content" style="display:none">
+  <div class="stats">
+    <div class="stat-card"><div class="label">Total Jobs</div><div class="value" id="stat-total">-</div></div>
+    <div class="stat-card"><div class="label">Failing</div><div class="value red" id="stat-failing">-</div></div>
+    <div class="stat-card"><div class="label">Executions (24h)</div><div class="value green" id="stat-exec">-</div></div>
+    <div class="stat-card"><div class="label">Failures (24h)</div><div class="value red" id="stat-fail">-</div></div>
+  </div>
+  <h2>Jobs</h2>
+  <table><thead><tr><th>App</th><th>Env</th><th>Job</th><th>Schedule</th><th>Status</th><th>Last Seen</th></tr></thead><tbody id="jobs-body"></tbody></table>
+  <h2>Recent Executions</h2>
+  <table><thead><tr><th>Job</th><th>Status</th><th>Duration</th><th>Error</th><th>Time</th></tr></thead><tbody id="exec-body"></tbody></table>
+</div>
+<script>
+const API = location.origin;
+function badge(s){ if(s==='SUCCESS') return '<span class="badge success">SUCCESS</span>'; if(s==='FAILURE') return '<span class="badge failure">FAILURE</span>'; return '<span class="badge unknown">UNKNOWN</span>'; }
+function ago(iso){ if(!iso) return '-'; const d=new Date(iso); const s=Math.floor((Date.now()-d.getTime())/1000); if(s<60) return s+'s ago'; if(s<3600) return Math.floor(s/60)+'m ago'; if(s<86400) return Math.floor(s/3600)+'h ago'; return Math.floor(s/86400)+'d ago'; }
+async function load(){
+  const token=document.getElementById('token').value.trim();
+  if(!token){ showError('Please enter your ingest token.'); return; }
+  const h={'Authorization':'Bearer '+token};
+  try{
+    const [summary,jobs,execs]=await Promise.all([
+      fetch(API+'/v1/summary',{headers:h}).then(r=>r.json()),
+      fetch(API+'/v1/jobs',{headers:h}).then(r=>r.json()),
+      fetch(API+'/v1/executions?limit=20',{headers:h}).then(r=>r.json())
+    ]);
+    if(!summary.ok||!jobs.ok||!execs.ok) throw new Error('API error');
+    document.getElementById('stat-total').textContent=summary.totalJobs;
+    document.getElementById('stat-failing').textContent=summary.failingJobs;
+    document.getElementById('stat-exec').textContent=summary.executions24h;
+    document.getElementById('stat-fail').textContent=summary.failures24h;
+    document.getElementById('jobs-body').innerHTML=jobs.jobs.map(j=>`<tr><td>${j.app}</td><td>${j.env}</td><td>${j.job_key}</td><td class="muted">${j.schedule}</td><td>${badge(j.last_status)}</td><td class="muted">${ago(j.last_seen)}</td></tr>`).join('')||'<tr><td colspan="6" class="muted">No jobs yet</td></tr>';
+    document.getElementById('exec-body').innerHTML=execs.executions.map(e=>`<tr><td>${e.job_key}</td><td>${badge(e.status)}</td><td>${e.duration_ms}ms</td><td class="muted">${e.error_class||''}</td><td class="muted">${ago(e.created_at)}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">No executions yet</td></tr>';
+    document.getElementById('content').style.display='block';
+    hideError();
+  }catch(e){ showError('Failed to load. Check your token and network.'); }
+}
+function showError(msg){ document.getElementById('error').textContent=msg; document.getElementById('error').style.display='block'; }
+function hideError(){ document.getElementById('error').style.display='none'; }
+document.getElementById('token').addEventListener('keydown',e=>{ if(e.key==='Enter') load(); });
+</script>
+</body>
+</html>
