@@ -22,6 +22,36 @@ async function readJson(request) {
     }
 }
 
+async function sendAlert(env, app, envName, jobKey, status, errorClass, errorMessage) {
+    const config = await env.DB.prepare(
+        "SELECT webhook_url, email FROM alert_config WHERE app = ?1 AND env = ?2 AND enabled = 1"
+    ).bind(app, envName).first();
+    if (!config) return;
+
+    const recent = await env.DB.prepare(
+        "SELECT id FROM alert_log WHERE app = ?1 AND env = ?2 AND job_key = ?3 AND alert_type = ?4 AND sent_at > datetime('now', '-30 minutes') LIMIT 1"
+    ).bind(app, envName, jobKey, "failure").first();
+    if (recent) return;
+
+    const msg = "JobPulse: " + jobKey + " FAILED in " + app + " (" + envName + ")" +
+        (errorClass ? " - " + errorClass : "") +
+        (errorMessage ? ": " + errorMessage : "");
+
+    if (config.webhook_url) {
+        try {
+            await fetch(config.webhook_url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: msg, app, env: envName, jobKey, status, errorClass, errorMessage })
+            });
+        } catch (e) { /* log but don't block */ }
+    }
+
+    await env.DB.prepare(
+        "INSERT INTO alert_log (app, env, job_key, alert_type, message) VALUES (?1, ?2, ?3, ?4, ?5)"
+    ).bind(app, envName, jobKey, "failure", msg).run();
+}
+
 export default {
     async fetch(request, env) {
         const url = new URL(request.url);
@@ -54,21 +84,27 @@ export default {
             if (!body || !body.app || !body.jobKey || !body.status) {
                 return json({ ok: false, error: "missing fields" }, 400);
             }
+            const envName = body.env || "default";
             const stmts = [];
             stmts.push(env.DB.prepare(
                 "INSERT INTO executions (app, env, job_key, status, started_at, duration_ms, error_class, error_message) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             ).bind(
-                body.app, body.env || "default", body.jobKey, body.status,
+                body.app, envName, body.jobKey, body.status,
                 body.startedAt || 0, body.durationMs || 0,
                 body.errorClass || null, body.errorMessage || null
             ));
             stmts.push(env.DB.prepare(
                 "UPDATE jobs SET last_seen = ?4, last_status = ?5 WHERE app = ?1 AND env = ?2 AND job_key = ?3"
             ).bind(
-                body.app, body.env || "default", body.jobKey,
+                body.app, envName, body.jobKey,
                 new Date().toISOString(), body.status
             ));
             await env.DB.batch(stmts);
+
+            if (body.status === "FAILURE") {
+                await sendAlert(env, body.app, envName, body.jobKey, body.status, body.errorClass, body.errorMessage);
+            }
+
             return json({ ok: true });
         }
 
@@ -123,6 +159,40 @@ export default {
                 executions24h: execResult.total_24h || 0,
                 failures24h: execResult.failures_24h || 0
             });
+        }
+
+        if (request.method === "POST" && url.pathname === "/v1/alerts/config") {
+            const body = await readJson(request);
+            if (!body || !body.app) {
+                return json({ ok: false, error: "missing app field" }, 400);
+            }
+            const envName = body.env || "default";
+            await env.DB.prepare(
+                "INSERT INTO alert_config (app, env, webhook_url, email) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(app, env) DO UPDATE SET webhook_url = excluded.webhook_url, email = excluded.email"
+            ).bind(body.app, envName, body.webhookUrl || null, body.email || null).run();
+            return json({ ok: true });
+        }
+
+        if (request.method === "GET" && url.pathname === "/v1/alerts/config") {
+            const qp = new URL(request.url).searchParams;
+            const app = qp.get("app");
+            const envName = qp.get("env") || "default";
+            if (!app) return json({ ok: false, error: "missing app param" }, 400);
+            const config = await env.DB.prepare(
+                "SELECT app, env, webhook_url, email, enabled FROM alert_config WHERE app = ?1 AND env = ?2"
+            ).bind(app, envName).first();
+            return json({ ok: true, config: config || null });
+        }
+
+        if (request.method === "GET" && url.pathname === "/v1/alerts/log") {
+            const qp = new URL(request.url).searchParams;
+            const app = qp.get("app");
+            let query = "SELECT id, app, env, job_key, alert_type, message, sent_at FROM alert_log";
+            const params = [];
+            if (app) { query += " WHERE app = ?1"; params.push(app); }
+            query += " ORDER BY sent_at DESC LIMIT 50";
+            const result = await env.DB.prepare(query).bind(...params).all();
+            return json({ ok: true, alerts: result.results });
         }
 
         return json({ ok: false, error: "not found" }, 404);
